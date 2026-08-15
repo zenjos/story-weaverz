@@ -18,35 +18,64 @@ export async function POST(request: NextRequest) {
 
     const prompt = buildAnalysisPrompt(novelText, sceneCount)
 
-    const response = await zai.chat.completions.create({
-      messages: [
-        {
-          role: 'system',
-          content: '你是一位专业的漫剧编剧，擅长将小说转化为视觉化的分镜脚本。你只返回纯 JSON 格式的数据，不包含 markdown 标记或其他文字。',
-        },
-        { role: 'user', content: prompt },
-      ],
-    })
+    let content = ''
 
-    const content = response.choices?.[0]?.message?.content || ''
-
-    // Extract JSON from response (handle markdown code blocks)
-    let jsonStr = content.trim()
-    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (jsonMatch) {
-      jsonStr = jsonMatch[1].trim()
+    // Try with response_format json first, fallback to plain text
+    try {
+      const response = await zai.chat.completions.create({
+        messages: [
+          {
+            role: 'system',
+            content: '你是一位专业的漫剧编剧，擅长将小说转化为视觉化的分镜脚本。你只返回纯 JSON 格式的数据，不包含 markdown 标记或其他文字。',
+          },
+          { role: 'user', content: prompt },
+        ],
+        response_format: { type: 'json_object' },
+      } as any)
+      content = response.choices?.[0]?.message?.content || ''
+    } catch {
+      // Fallback: some API versions don't support response_format
+      const response = await zai.chat.completions.create({
+        messages: [
+          {
+            role: 'system',
+            content: '你是一位专业的漫剧编剧，擅长将小说转化为视觉化的分镜脚本。你只返回纯 JSON 格式的数据，不包含 markdown 标记或其他文字。',
+          },
+          { role: 'user', content: prompt },
+        ],
+      })
+      content = response.choices?.[0]?.message?.content || ''
     }
 
-    // Try to parse JSON
+    if (!content) {
+      throw new Error('AI 返回了空内容，请重试')
+    }
+
+    // Extract JSON from response (handle markdown code blocks, extra text, etc.)
+    let jsonStr = content.trim()
+
+    // Remove markdown code blocks
+    const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/)
+    if (codeBlockMatch) {
+      jsonStr = codeBlockMatch[1].trim()
+    }
+
+    // Try to parse JSON directly
     let analysis: StoryAnalysis
     try {
       analysis = JSON.parse(jsonStr)
     } catch {
-      // If JSON parse fails, try to find JSON object
+      // If direct parse fails, try to extract the JSON object
       const objMatch = jsonStr.match(/\{[\s\S]*\}/)
       if (objMatch) {
-        analysis = JSON.parse(objMatch[0])
+        try {
+          analysis = JSON.parse(objMatch[0])
+        } catch {
+          console.error('[Analyze API] Failed to parse JSON:', jsonStr.substring(0, 500))
+          throw new Error('AI 返回的数据格式不正确，请重试')
+        }
       } else {
+        console.error('[Analyze API] No JSON found in response:', jsonStr.substring(0, 500))
         throw new Error('无法解析 AI 返回的数据')
       }
     }
